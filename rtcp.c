@@ -970,7 +970,7 @@ static void janus_rtcp_estimate_in_link_quality(janus_rtcp_context *ctx) {
 
 	JANUS_LOG(LOG_HUGE, "In link quality=%"SCNu32", media link quality=%"SCNu32"\n", janus_rtcp_context_get_in_link_quality(ctx), janus_rtcp_context_get_in_media_link_quality(ctx));
 	JANUS_LOG(LOG_HUGE, "Expected=%"SCNu32", expected prior=%"SCNu32"\n", ctx->expected, ctx->expected_prior);
-	JANUS_LOG(LOG_HUGE, "Seq cycle=%"SCNu16", max seq=%"SCNu16", base seq=%"SCNu16"\n", ctx->seq_cycle, ctx->max_seq_nr, ctx->base_seq)
+	JANUS_LOG(LOG_HUGE, "Seq cycle=%"SCNu16", max seq=%"SCNu16", base seq=%"SCNu16"\n", ctx->seq_cycle, ctx->max_seq_nr, ctx->base_seq);
 }
 
 int janus_rtcp_report_block(janus_rtcp_context *ctx, janus_report_block *rb) {
