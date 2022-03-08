@@ -823,12 +823,12 @@ int janus_rtcp_process_incoming_rtp(janus_rtcp_context *ctx, char *packet, int l
 	/* Now parse this RTP packet header and update the rtcp_context instance */
 	uint16_t seq_number = ntohs(rtp->seq_number);
 	if(ctx->base_seq == 0 && ctx->seq_cycle == 0)
-		ctx->base_seq = seq_number;
+		ctx->base_seq = ctx->max_seq_nr = seq_number;
 
 	int64_t now = janus_get_monotonic_time();
 	if (!rfc4588_pkt) {
 		/* Non-RTX packet */
-		if ((int32_t)(seq_number - ctx->max_seq_nr) > 0) {
+		if ((int16_t)(seq_number - ctx->max_seq_nr) > 0) {
 			/* In-order packet */
 			ctx->received++;
 
