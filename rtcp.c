@@ -828,7 +828,7 @@ int janus_rtcp_process_incoming_rtp(janus_rtcp_context *ctx, char *packet, int l
 	int64_t now = janus_get_monotonic_time();
 	if (!rfc4588_pkt) {
 		/* Non-RTX packet */
-		if ((int16_t)(seq_number - ctx->max_seq_nr) > 0) {
+		if ((int32_t)(seq_number - ctx->max_seq_nr) > 0) {
 			/* In-order packet */
 			ctx->received++;
 
@@ -957,7 +957,7 @@ static void janus_rtcp_estimate_in_link_quality(janus_rtcp_context *ctx) {
 	if (link_lost < 0) {
 		link_lost = 0;
 	}
-	double link_q = !expected_interval ? 100.0 : 100.0 - (100.0 * (double)link_lost / (double)expected_interval);
+	double link_q = !expected_interval ? 0 : 100.0 - (100.0 * (double)link_lost / (double)expected_interval);
 	ctx->in_link_quality = janus_rtcp_link_quality_filter(ctx->in_link_quality, link_q);
 
 	/* Media lost is calculated considering also retransmitted packets */
@@ -965,7 +965,7 @@ static void janus_rtcp_estimate_in_link_quality(janus_rtcp_context *ctx) {
 	if (media_lost < 0) {
 		media_lost = 0;
 	}
-	double media_link_q = !expected_interval ? 100.0 : 100.0 - (100.0 * (double)media_lost / (double)expected_interval);
+	double media_link_q = !expected_interval ? 0 : 100.0 - (100.0 * (double)media_lost / (double)expected_interval);
 	ctx->in_media_link_quality = janus_rtcp_link_quality_filter(ctx->in_media_link_quality, media_link_q);
 
 	JANUS_LOG(LOG_HUGE, "In link quality=%"SCNu32", media link quality=%"SCNu32"\n", janus_rtcp_context_get_in_link_quality(ctx), janus_rtcp_context_get_in_media_link_quality(ctx));
