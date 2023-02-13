@@ -1379,6 +1379,7 @@ static void janus_ice_plugin_session_free(const janus_refcount *app_handle_ref) 
 		app_handle->gateway_handle = NULL;
 		janus_refcount_decrease(&handle->ref);
 	}
+	JANUS_LOG(LOG_VERB, "g_free(app_handle)");
 	g_free(app_handle);
 }
 
