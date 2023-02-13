@@ -760,6 +760,7 @@ static void session_free(gpointer data) {
 		default:
 			break;
 		}
+		janus_refcount_decrease(&session->handle->ref);
 		session->handle = NULL;
 		g_free(session);
 		session = NULL;
