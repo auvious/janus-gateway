@@ -23,7 +23,7 @@
  * \note This application does not create a special file in INI format with
  * \c .nfo extension for each recording that is saved anymore. This is not necessary
  * as we use rtc-recorder specific metadata to map a specific audio .mjr file 
- * to its corresponding .mjr one, since they always get saved in different files. 
+ * to its corresponding video .mjr one, since they always get saved in different files. 
  * \section recplayapi Record&Play API
  *
  * The Record&Play API supports several requests, some of which are
@@ -258,8 +258,8 @@
 
 
 /* Plugin information */
-#define JANUS_AUVIOUSRECORDPLAY_VERSION			4
-#define JANUS_AUVIOUSRECORDPLAY_VERSION_STRING		"0.0.4"
+#define JANUS_AUVIOUSRECORDPLAY_VERSION			5
+#define JANUS_AUVIOUSRECORDPLAY_VERSION_STRING		"0.0.5"
 #define JANUS_AUVIOUSRECORDPLAY_DESCRIPTION		"This is a trivial Record&Play plugin for Janus, to record WebRTC sessions and replay them."
 #define JANUS_AUVIOUSRECORDPLAY_NAME				"JANUS Auvious Record&Play plugin"
 #define JANUS_AUVIOUSRECORDPLAY_AUTHOR				"Meetecho s.r.l."
@@ -449,7 +449,6 @@ static void janus_auviousrecordplay_recording_free(const janus_refcount *recordi
 
 
 static char *recordings_path = NULL;
-void janus_auviousrecordplay_update_recordings_list(void);
 static void *janus_auviousrecordplay_playout_thread(void *data);
 
 /* Helper to send RTCP feedback back to recorders, if needed */
@@ -706,7 +705,6 @@ int janus_auviousrecordplay_init(janus_callbacks *callback, const char *config_p
 		}
 	}
 	recordings = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, (GDestroyNotify)janus_auviousrecordplay_recording_destroy);
-	// janus_auviousrecordplay_update_recordings_list();
 
 	sessions = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)janus_auviousrecordplay_session_destroy);
 	messages = g_async_queue_new_full((GDestroyNotify) janus_auviousrecordplay_message_free);
@@ -916,9 +914,7 @@ struct janus_plugin_result *janus_auviousrecordplay_handle_message(janus_plugin_
 	/* Some requests ('create' and 'destroy') can be handled synchronously */
 	const char *request_text = json_string_value(request);
 	if(!strcasecmp(request_text, "update")) {
-		/* Update list of available recordings, scanning the folder again */
-		// janus_auviousrecordplay_update_recordings_list();
-		/* Send info back */
+		/* Nothing to do here just send info back */
 		response = json_object();
 		json_object_set_new(response, "recordplay", json_string("ok"));
 		goto plugin_response;
@@ -1177,6 +1173,14 @@ void janus_auviousrecordplay_hangup_media(janus_plugin_session *handle) {
 	janus_mutex_unlock(&sessions_mutex);
 }
 
+static void janus_auviousrecordplay_recordings_remove(janus_auviousrecordplay_recording *rec) {
+	janus_mutex_lock(&recordings_mutex);
+	if (g_hash_table_remove(recordings, &rec->id)) {
+		JANUS_LOG(LOG_VERB, "[%s] Recording removed from list.\n", JANUS_AUVIOUSRECORDPLAY_PACKAGE);
+	}
+	janus_mutex_unlock(&recordings_mutex);
+}
+
 static void janus_auviousrecordplay_hangup_media_internal(janus_plugin_session *handle) {
 	if(g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
 		return;
@@ -1229,6 +1233,7 @@ static void janus_auviousrecordplay_hangup_media_internal(janus_plugin_session *
 		}
 	}
 	if(session->recording) {
+		janus_auviousrecordplay_recordings_remove(session->recording);
 		janus_refcount_decrease(&session->recording->ref);
 		session->recording = NULL;
 	}
@@ -1283,6 +1288,9 @@ static void *janus_auviousrecordplay_handler(void *data) {
 		const char *msg_sdp = json_string_value(json_object_get(msg->jsep, "sdp"));
 		json_t *request = json_object_get(root, "request");
 		const char *request_text = json_string_value(request);
+
+		JANUS_LOG(LOG_VERB, "  >> Handling request type: %s\n", request_text); 
+
 		json_t *event = NULL;
 		json_t *result = NULL;
 		char *sdp = NULL;
@@ -1627,7 +1635,6 @@ playdone:
 					gateway->notify_event(&janus_auviousrecordplay_plugin, session->handle, info);
 				}
 			}
-			/* Stop the recording/playout */
 			janus_auviousrecordplay_hangup_media(session->handle);
 		} else if (!strcasecmp(request_text, "record-generate-offer")) {
 			JANUS_LOG(LOG_VERB, "Generating an offer for recording\n");
@@ -1903,8 +1910,8 @@ recadone:
 			json_decref(jsep);
 		}
 		janus_auviousrecordplay_message_free(msg);
+        JANUS_LOG(LOG_INFO, "  >> Listed recordings: %u\n", g_hash_table_size(recordings));
 		continue;
-
 error:
 		{
 			/* Prepare JSON error event */
@@ -1920,19 +1927,6 @@ error:
 	}
 	JANUS_LOG(LOG_VERB, "LeavingRecord&Play handler thread\n");
 	return NULL;
-}
-
-void janus_auviousrecordplay_update_recordings_list(void) {
-	if(recordings_path == NULL)
-		return;
-	// JANUS_LOG(LOG_VERB, "Updating recordings list in %s\n", recordings_path);
-	// janus_mutex_lock(&recordings_mutex);
-
-	 /* This section previously managed recordings based on .nfo files, 
-       which is now skipped due to the removal of .nfo file usage. 
-       Left as a placeholder for potential new metadata management logic. */
-
-	// janus_mutex_unlock(&recordings_mutex);
 }
 
 janus_auviousrecordplay_frame_packet *janus_auviousrecordplay_get_frames(const char *dir, const char *filename) {
