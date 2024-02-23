@@ -1221,17 +1221,6 @@ static void janus_auviousrecordplay_hangup_media_internal(janus_plugin_session *
 	}
 	session->vrc = NULL;
 	janus_mutex_unlock(&session->rec_mutex);
-	if(session->recorder) {
-		if(session->recording) {
-			g_atomic_int_set(&session->recording->completed, 1);
-			/* Generate the offer */
-			if(janus_auviousrecordplay_generate_offer(session->recording) < 0) {
-				JANUS_LOG(LOG_WARN, "Could not generate offer for recording %"SCNu64"...\n", session->recording->id);
-			}
-		} else {
-			JANUS_LOG(LOG_WARN, "Got a stop but missing recorder/recording!\n");
-		}
-	}
 	if(session->recording) {
 		janus_auviousrecordplay_recordings_remove(session->recording);
 		janus_refcount_decrease(&session->recording->ref);
