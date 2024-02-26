@@ -1899,7 +1899,7 @@ recadone:
 			json_decref(jsep);
 		}
 		janus_auviousrecordplay_message_free(msg);
-		JANUS_LOG(LOG_INFO, "  >> Listed recordings: %u\n", g_hash_table_size(recordings));
+		JANUS_LOG(LOG_VERB, "  >> Listed recordings: %u\n", g_hash_table_size(recordings));
 		continue;
 error:
 		{
