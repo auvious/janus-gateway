@@ -3357,6 +3357,9 @@ int janus_ice_setup_local(janus_ice_handle *handle, int offer, int audio, int vi
 		"ice-udp", TRUE,
 		"ice-tcp", janus_ice_tcp_enabled ? TRUE : FALSE,
 #endif
+#ifdef HAVE_LIBNICE_KEEPALIVE_CONNCHECK
+		"keepalive-conncheck", TRUE,
+#endif
 		NULL);
 	handle->agent_created = janus_get_monotonic_time();
 	handle->srtp_errors_count = 0;

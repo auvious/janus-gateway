@@ -401,6 +401,12 @@ AC_CHECK_LIB([nice],
              [AC_MSG_NOTICE([libnice version does not support TCP candidates])]
              )
 
+AC_CHECK_LIB([nice],
+             [nice_agent_peer_candidate_gathering_done],
+             [AC_DEFINE(HAVE_LIBNICE_KEEPALIVE_CONNCHECK)],
+             [AC_MSG_NOTICE([libnice version does not support keepalive-conncheck])]
+             )
+
 AC_CHECK_LIB([dl],
              [dlopen],
              [JANUS_MANUAL_LIBS="${JANUS_MANUAL_LIBS} -ldl"],
