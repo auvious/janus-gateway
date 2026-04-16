@@ -2140,6 +2140,7 @@ static struct janus_json_parameter subscriber_parameters[] = {
 	{"streams", JANUS_JSON_ARRAY, 0},
 	{"private_id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
 	{"autoupdate", JANUS_JSON_BOOL, 0},
+	{"listener_creates_offer", JANUS_JSON_BOOL, 0},
 	/* All the following parameters are deprecated: use streams instead */
 	{"audio", JANUS_JSON_BOOL, 0},
 	{"video", JANUS_JSON_BOOL, 0},
@@ -2565,6 +2566,7 @@ typedef struct janus_videoroom_subscriber {
 	gboolean paused;
 	gboolean kicked;	/* Whether this subscription belongs to a participant that has been kicked */
 	gboolean e2ee;		/* If media for this subscriber is end-to-end encrypted */
+	gboolean listener_creates_offer;	/* Whether the subscriber creates the SDP offer instead of Janus */
 	volatile gint answered, pending_offer, pending_restart, skipped_autoupdate;
 	volatile gint destroyed;
 	janus_refcount ref;
@@ -3693,6 +3695,96 @@ static json_t *janus_videoroom_subscriber_offer(janus_videoroom_subscriber *subs
 		json_object_set_new(jsep, "e2ee", json_true());
 	g_free(sdp);
 	/* Done */
+	return jsep;
+}
+
+/* Helper to generate an answer to a subscriber-created offer */
+static json_t *janus_videoroom_subscriber_answer(janus_videoroom_subscriber *subscriber, const char *offer_sdp) {
+	/* Parse the subscriber's offer */
+	char error_str[512];
+	janus_sdp *offer = janus_sdp_parse(offer_sdp, error_str, sizeof(error_str));
+	if(offer == NULL) {
+		JANUS_LOG(LOG_ERR, "Error parsing subscriber offer: %s\n", error_str);
+		return NULL;
+	}
+	char audio_fmtp[256];
+	janus_sdp *answer = janus_sdp_generate_answer(offer);
+	/* Iterate over the offer's m-lines and match to subscriber streams */
+	GList *temp = offer->m_lines;
+	while(temp) {
+		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
+		janus_videoroom_subscriber_stream *stream =
+			g_hash_table_lookup(subscriber->streams_byid, GINT_TO_POINTER(m->index));
+		if(stream == NULL) {
+			/* No matching stream, reject this m-line */
+			janus_sdp_generate_answer_mline(offer, answer, m,
+				JANUS_SDP_OA_MLINE, m->type == JANUS_SDP_AUDIO ? JANUS_SDP_AUDIO :
+					(m->type == JANUS_SDP_VIDEO ? JANUS_SDP_VIDEO : JANUS_SDP_APPLICATION),
+				JANUS_SDP_OA_DIRECTION, JANUS_SDP_INACTIVE,
+				JANUS_SDP_OA_DONE);
+			temp = temp->next;
+			continue;
+		}
+		if(stream->type == JANUS_VIDEOROOM_MEDIA_DATA) {
+			/* Data channel: accept as-is */
+			janus_sdp_generate_answer_mline(offer, answer, m,
+				JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
+				JANUS_SDP_OA_DONE);
+			g_atomic_int_set(&stream->ready, 1);
+			temp = temp->next;
+			continue;
+		}
+		janus_videoroom_publisher_stream *ps = stream->publisher_streams ?
+			stream->publisher_streams->data : NULL;
+		const char *codec = NULL;
+		audio_fmtp[0] = '\0';
+		if(stream->type == JANUS_VIDEOROOM_MEDIA_AUDIO) {
+			codec = janus_audiocodec_name(stream->acodec);
+			if(ps && ps->opusfec)
+				g_snprintf(audio_fmtp, sizeof(audio_fmtp), "useinbandfec=1");
+			if(ps && ps->opusdtx) {
+				if(strlen(audio_fmtp) == 0)
+					g_snprintf(audio_fmtp, sizeof(audio_fmtp), "usedtx=1");
+				else
+					janus_strlcat(audio_fmtp, ";usedtx=1", sizeof(audio_fmtp));
+			}
+			if(ps && ps->opusstereo) {
+				if(strlen(audio_fmtp) == 0)
+					g_snprintf(audio_fmtp, sizeof(audio_fmtp), "stereo=1");
+				else
+					janus_strlcat(audio_fmtp, ";stereo=1", sizeof(audio_fmtp));
+			}
+		} else {
+			codec = janus_videocodec_name(stream->vcodec);
+		}
+		janus_sdp_generate_answer_mline(offer, answer, m,
+			JANUS_SDP_OA_MLINE, stream->type == JANUS_VIDEOROOM_MEDIA_AUDIO ? JANUS_SDP_AUDIO : JANUS_SDP_VIDEO,
+			JANUS_SDP_OA_CODEC, codec,
+			JANUS_SDP_OA_FMTP, (stream->type == JANUS_VIDEOROOM_MEDIA_AUDIO && strlen(audio_fmtp) ? audio_fmtp : NULL),
+			JANUS_SDP_OA_H264_PROFILE, (stream->type == JANUS_VIDEOROOM_MEDIA_VIDEO ? stream->h264_profile : NULL),
+			JANUS_SDP_OA_VP9_PROFILE, (stream->type == JANUS_VIDEOROOM_MEDIA_VIDEO ? stream->vp9_profile : NULL),
+			JANUS_SDP_OA_DIRECTION, (ps && !ps->disabled) ? JANUS_SDP_SENDONLY : JANUS_SDP_INACTIVE,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_MID,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_AUDIO_LEVEL,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_VIDEO_ORIENTATION,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_PLAYOUT_DELAY,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_TRANSPORT_WIDE_CC,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_ABS_SEND_TIME,
+			JANUS_SDP_OA_ACCEPT_EXTMAP, JANUS_RTP_EXTMAP_ABS_CAPTURE_TIME,
+			JANUS_SDP_OA_DONE);
+		g_atomic_int_set(&stream->ready, 1);
+		temp = temp->next;
+	}
+	/* Update (or set) the SDP version */
+	subscriber->session->sdp_version++;
+	answer->o_version = subscriber->session->sdp_version;
+	char *sdp = janus_sdp_write(answer);
+	janus_sdp_destroy(offer);
+	janus_sdp_destroy(answer);
+	json_t *jsep = json_pack("{ssss}", "type", "answer", "sdp", sdp);
+	if(subscriber->e2ee)
+		json_object_set_new(jsep, "e2ee", json_true());
+	g_free(sdp);
 	return jsep;
 }
 
@@ -9442,15 +9534,18 @@ static void janus_videoroom_hangup_media_internal(gpointer session_data) {
 					if(notify_events && gateway->events_is_enabled())
 						media_event = json_deep_copy(media);
 					json_object_set_new(event, "streams", media);
-					/* Generate a new offer */
-					json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+					/* Generate a new offer, unless the subscriber creates offers */
+					json_t *jsep = NULL;
+					if(!subscriber->listener_creates_offer)
+						jsep = janus_videoroom_subscriber_offer(subscriber);
 					janus_mutex_unlock(&subscriber->streams_mutex);
 					/* How long will the Janus core take to push the event? */
 					gint64 start = janus_get_monotonic_time();
 					int res = gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, jsep);
 					JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 					json_decref(event);
-					json_decref(jsep);
+					if(jsep)
+						json_decref(jsep);
 					/* Also notify event handlers */
 					if(notify_events && gateway->events_is_enabled()) {
 						json_t *info = json_object();
@@ -10149,6 +10244,8 @@ static void *janus_videoroom_handler(void *data) {
 				gboolean use_msid  = json_is_true(msid);
 				json_t *au = json_object_get(root, "autoupdate");
 				gboolean autoupdate  = au ? json_is_true(au) : TRUE;
+				json_t *lco = json_object_get(root, "listener_creates_offer");
+				gboolean listener_creates_offer = json_is_true(lco);
 				/* Make sure all the feeds we're subscribing to exist */
 				GList *publishers = NULL;
 				gboolean e2ee = videoroom->require_e2ee, sub_e2ee = FALSE, first = TRUE;
@@ -10369,6 +10466,7 @@ static void *janus_videoroom_handler(void *data) {
 				subscriber->pvt_id = pvt_id;
 				subscriber->use_msid = use_msid;
 				subscriber->autoupdate = autoupdate;
+				subscriber->listener_creates_offer = listener_creates_offer;
 				subscriber->paused = TRUE;	/* We need an explicit start from the stream */
 				subscriber->streams_byid = g_hash_table_new_full(NULL, NULL,
 					NULL, (GDestroyNotify)janus_videoroom_subscriber_stream_destroy);
@@ -10640,8 +10738,16 @@ static void *janus_videoroom_handler(void *data) {
 				json_object_set_new(event, "streams", media);
 				session->participant_type = janus_videoroom_p_type_subscriber;
 				JANUS_LOG(LOG_VERB, "Preparing JSON event as a reply\n");
-				/* Negotiate by crafting a new SDP matching the subscriptions */
-				json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+				json_t *jsep = NULL;
+				if(subscriber->listener_creates_offer) {
+					/* Subscriber will create the offer, don't send JSEP now */
+					JANUS_LOG(LOG_VERB, "Subscriber will create the SDP offer\n");
+					subscriber->paused = FALSE;
+					g_atomic_int_set(&subscriber->answered, 1);
+				} else {
+					/* Negotiate by crafting a new SDP matching the subscriptions */
+					jsep = janus_videoroom_subscriber_offer(subscriber);
+				}
 				janus_mutex_unlock(&subscriber->streams_mutex);
 				janus_mutex_unlock(&sessions_mutex);
 				/* How long will the Janus core take to push the event? */
@@ -10650,7 +10756,8 @@ static void *janus_videoroom_handler(void *data) {
 				int res = gateway->push_event(msg->handle, &janus_videoroom_plugin, msg->transaction, event, jsep);
 				JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 				json_decref(event);
-				json_decref(jsep);
+				if(jsep)
+					json_decref(jsep);
 				if(res < 0) {
 					/* Something went wrong, get rid of the subscription */
 					if(media_event)
@@ -11742,8 +11849,10 @@ static void *janus_videoroom_handler(void *data) {
 				if(notify_events && gateway->events_is_enabled())
 					media_event = json_deep_copy(media);
 				json_object_set_new(event, "streams", media);
-				/* Generate a new offer */
-				json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+				/* Generate a new offer, unless the subscriber creates offers */
+				json_t *jsep = NULL;
+				if(!subscriber->listener_creates_offer)
+					jsep = janus_videoroom_subscriber_offer(subscriber);
 				janus_mutex_unlock(&subscriber->streams_mutex);
 				janus_mutex_unlock(&subscriber->room->mutex);
 				/* How long will the Janus core take to push the event? */
@@ -11751,7 +11860,8 @@ static void *janus_videoroom_handler(void *data) {
 				int res = gateway->push_event(msg->handle, &janus_videoroom_plugin, msg->transaction, event, jsep);
 				JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 				json_decref(event);
-				json_decref(jsep);
+				if(jsep)
+					json_decref(jsep);
 				/* Also notify event handlers */
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
@@ -12086,16 +12196,20 @@ static void *janus_videoroom_handler(void *data) {
 						janus_videoroom_message_free(msg);
 						continue;
 					}
-					json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+					json_t *jsep = NULL;
+					if(!subscriber->listener_creates_offer) {
+						jsep = janus_videoroom_subscriber_offer(subscriber);
+						if(do_restart)
+							json_object_set_new(jsep, "restart", json_true());
+					}
 					janus_mutex_unlock(&subscriber->streams_mutex);
-					if(do_restart)
-						json_object_set_new(jsep, "restart", json_true());
 					/* How long will the Janus core take to push the event? */
 					gint64 start = janus_get_monotonic_time();
 					int res = gateway->push_event(msg->handle, &janus_videoroom_plugin, msg->transaction, event, jsep);
 					JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 					json_decref(event);
-					json_decref(jsep);
+					if(jsep)
+						json_decref(jsep);
 					janus_refcount_decrease(&subscriber->ref);
 					/* Done */
 					janus_videoroom_message_free(msg);
@@ -12557,15 +12671,18 @@ static void *janus_videoroom_handler(void *data) {
 						if(notify_events && gateway->events_is_enabled())
 							media_event = json_deep_copy(media);
 						json_object_set_new(revent, "streams", media);
-						/* Generate a new offer */
-						json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+						/* Generate a new offer, unless the subscriber creates offers */
+						json_t *jsep = NULL;
+						if(!subscriber->listener_creates_offer)
+							jsep = janus_videoroom_subscriber_offer(subscriber);
 						janus_mutex_unlock(&subscriber->streams_mutex);
 						/* How long will the Janus core take to push the event? */
 						gint64 start = janus_get_monotonic_time();
 						int res = gateway->push_event(msg->handle, &janus_videoroom_plugin, msg->transaction, revent, jsep);
 						JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 						json_decref(revent);
-						json_decref(jsep);
+						if(jsep)
+							json_decref(jsep);
 						/* Also notify event handlers */
 						if(notify_events && gateway->events_is_enabled()) {
 							json_t *info = json_object();
@@ -12670,18 +12787,22 @@ static void *janus_videoroom_handler(void *data) {
 					if(notify_events && gateway->events_is_enabled())
 						media_event = json_deep_copy(media);
 					json_object_set_new(event, "streams", media);
-					/* Generate a new offer */
-					json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
-					/* Do we need an ICE restart as well? */
-					if(g_atomic_int_compare_and_exchange(&subscriber->pending_restart, 1, 0))
-						json_object_set_new(jsep, "restart", json_true());
+					/* Generate a new offer, unless the subscriber creates offers */
+					json_t *jsep = NULL;
+					if(!subscriber->listener_creates_offer) {
+						jsep = janus_videoroom_subscriber_offer(subscriber);
+						/* Do we need an ICE restart as well? */
+						if(g_atomic_int_compare_and_exchange(&subscriber->pending_restart, 1, 0))
+							json_object_set_new(jsep, "restart", json_true());
+					}
 					janus_mutex_unlock(&subscriber->streams_mutex);
 					/* How long will the Janus core take to push the event? */
 					gint64 start = janus_get_monotonic_time();
 					int res = gateway->push_event(session->handle, &janus_videoroom_plugin, NULL, event, jsep);
 					JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 					json_decref(event);
-					json_decref(jsep);
+					if(jsep)
+						json_decref(jsep);
 					/* Also notify event handlers */
 					if(notify_events && gateway->events_is_enabled()) {
 						json_t *info = json_object();
@@ -12707,8 +12828,43 @@ static void *janus_videoroom_handler(void *data) {
 				json_decref(event);
 				goto error;
 			}
-			if(session->participant_type != janus_videoroom_p_type_publisher) {
-				/* We shouldn't be here, we always offer ourselves */
+			if(session->participant_type == janus_videoroom_p_type_subscriber) {
+				/* Check if this subscriber uses listener_creates_offer */
+				subscriber = janus_videoroom_session_get_subscriber(session);
+				if(subscriber == NULL || !subscriber->listener_creates_offer) {
+					if(subscriber)
+						janus_refcount_decrease(&subscriber->ref);
+					JANUS_LOG(LOG_ERR, "Only publishers send offers\n");
+					error_code = JANUS_VIDEOROOM_ERROR_INVALID_SDP_TYPE;
+					g_snprintf(error_cause, 512, "Only publishers send offers");
+					json_decref(event);
+					goto error;
+				}
+				/* Subscriber is creating the offer, generate an answer */
+				JANUS_LOG(LOG_VERB, "Processing SDP offer from subscriber (listener_creates_offer)\n");
+				janus_mutex_lock(&subscriber->streams_mutex);
+				json_t *jsep = janus_videoroom_subscriber_answer(subscriber, msg_sdp);
+				janus_mutex_unlock(&subscriber->streams_mutex);
+				if(jsep == NULL) {
+					janus_refcount_decrease(&subscriber->ref);
+					JANUS_LOG(LOG_ERR, "Error generating answer for subscriber offer\n");
+					error_code = JANUS_VIDEOROOM_ERROR_UNKNOWN_ERROR;
+					g_snprintf(error_cause, 512, "Error generating answer for subscriber offer");
+					json_decref(event);
+					goto error;
+				}
+				g_atomic_int_set(&session->hangingup, 0);
+				g_atomic_int_set(&subscriber->answered, 1);
+				subscriber->paused = FALSE;
+				/* Send the answer back */
+				int ret = gateway->push_event(msg->handle, &janus_videoroom_plugin, msg->transaction, event, jsep);
+				JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (%s)\n", ret, janus_get_api_error(ret));
+				json_decref(event);
+				json_decref(jsep);
+				janus_refcount_decrease(&subscriber->ref);
+				janus_videoroom_message_free(msg);
+				continue;
+			} else if(session->participant_type != janus_videoroom_p_type_publisher) {
 				JANUS_LOG(LOG_ERR, "Only publishers send offers\n");
 				error_code = JANUS_VIDEOROOM_ERROR_INVALID_SDP_TYPE;
 				g_snprintf(error_cause, 512, "Only publishers send offers");
@@ -14141,15 +14297,18 @@ cleanup:
 				if(notify_events && gateway->events_is_enabled())
 					media_event = json_deep_copy(media);
 				json_object_set_new(event, "streams", media);
-				/* Generate a new offer */
-				json_t *jsep = janus_videoroom_subscriber_offer(subscriber);
+				/* Generate a new offer, unless the subscriber creates offers */
+				json_t *jsep = NULL;
+				if(!subscriber->listener_creates_offer)
+					jsep = janus_videoroom_subscriber_offer(subscriber);
 				janus_mutex_unlock(&subscriber->streams_mutex);
 				/* How long will the Janus core take to push the event? */
 				gint64 start = janus_get_monotonic_time();
 				int res = gateway->push_event(subscriber->session->handle, &janus_videoroom_plugin, NULL, event, jsep);
 				JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %"SCNu64" us)\n", res, janus_get_monotonic_time()-start);
 				json_decref(event);
-				json_decref(jsep);
+				if(jsep)
+					json_decref(jsep);
 				/* Also notify event handlers */
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
