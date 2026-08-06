@@ -3717,12 +3717,133 @@ static json_t *janus_videoroom_subscriber_answer(janus_videoroom_subscriber *sub
 	}
 	char audio_fmtp[256];
 	janus_sdp *answer = janus_sdp_generate_answer(offer);
-	/* Iterate over the offer's m-lines and match to subscriber streams */
+	/* Map each offered m-line to a subscription stream: prefer the stream at the
+	 * same index when the type matches, otherwise fall back to the first stream
+	 * of the same type that hasn't been matched yet. Subscribers that create the
+	 * offer (e.g. a recording pipeline whose offer is always audio-first) may
+	 * order m-lines differently from the publisher */
+	guint num_mlines = g_list_length(offer->m_lines);
+	janus_videoroom_subscriber_stream **matched =
+		g_malloc0((num_mlines+1) * sizeof(janus_videoroom_subscriber_stream *));
+	GSList *claimed = NULL;
 	GList *temp = offer->m_lines;
 	while(temp) {
 		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
+		janus_videoroom_media mtype = JANUS_VIDEOROOM_MEDIA_NONE;
+		if(m->type == JANUS_SDP_AUDIO)
+			mtype = JANUS_VIDEOROOM_MEDIA_AUDIO;
+		else if(m->type == JANUS_SDP_VIDEO)
+			mtype = JANUS_VIDEOROOM_MEDIA_VIDEO;
+		else if(m->type == JANUS_SDP_APPLICATION)
+			mtype = JANUS_VIDEOROOM_MEDIA_DATA;
 		janus_videoroom_subscriber_stream *stream =
 			g_hash_table_lookup(subscriber->streams_byid, GINT_TO_POINTER(m->index));
+		if(stream == NULL || stream->type != mtype || g_slist_find(claimed, stream) != NULL) {
+			/* No stream at this index with the right type, find the first
+			 * unclaimed stream of the same media type instead */
+			stream = NULL;
+			GList *sl = subscriber->streams;
+			while(sl) {
+				janus_videoroom_subscriber_stream *s = (janus_videoroom_subscriber_stream *)sl->data;
+				if(s->type == mtype && g_slist_find(claimed, s) == NULL) {
+					stream = s;
+					break;
+				}
+				sl = sl->next;
+			}
+		}
+		if(stream != NULL && m->index >= 0 && (guint)m->index <= num_mlines) {
+			matched[m->index] = stream;
+			claimed = g_slist_prepend(claimed, stream);
+		}
+		temp = temp->next;
+	}
+	g_slist_free(claimed);
+	/* If any stream ended up on a different m-line index than before, re-key the
+	 * maps and update mindex/mid so relaying and mid-addressed requests work */
+	gboolean reorder = FALSE;
+	temp = offer->m_lines;
+	while(temp) {
+		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
+		if(matched[m->index] != NULL && matched[m->index]->mindex != m->index) {
+			reorder = TRUE;
+			break;
+		}
+		temp = temp->next;
+	}
+	if(reorder) {
+		/* Empty both maps without dropping any reference */
+		GList *sl = subscriber->streams;
+		while(sl) {
+			janus_videoroom_subscriber_stream *s = (janus_videoroom_subscriber_stream *)sl->data;
+			g_hash_table_steal(subscriber->streams_byid, GINT_TO_POINTER(s->mindex));
+			gpointer old_key = NULL, old_value = NULL;
+			if(s->mid != NULL && g_hash_table_steal_extended(subscriber->streams_bymid, s->mid, &old_key, &old_value))
+				g_free(old_key);
+			sl = sl->next;
+		}
+		/* Matched streams take the index and mid of the m-line they matched */
+		temp = offer->m_lines;
+		while(temp) {
+			janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
+			janus_videoroom_subscriber_stream *s = matched[m->index];
+			if(s != NULL) {
+				JANUS_LOG(LOG_VERB, "Subscriber stream %d (%s) now maps to offer m-line #%d\n",
+					s->mindex, s->mid, m->index);
+				s->mindex = m->index;
+				const char *mid = NULL;
+				GList *ma = m->attributes;
+				while(ma) {
+					janus_sdp_attribute *a = (janus_sdp_attribute *)ma->data;
+					if(a->name && a->value && !strcasecmp(a->name, "mid")) {
+						mid = a->value;
+						break;
+					}
+					ma = ma->next;
+				}
+				char midbuf[16];
+				if(mid == NULL) {
+					g_snprintf(midbuf, sizeof(midbuf), "%d", s->mindex);
+					mid = midbuf;
+				}
+				char *old_mid = s->mid;
+				s->mid = g_strdup(mid);
+				g_free(old_mid);
+			}
+			temp = temp->next;
+		}
+		/* Streams that matched no m-line are parked on free indexes and stop relaying */
+		int free_index = (int)num_mlines;
+		sl = subscriber->streams;
+		while(sl) {
+			janus_videoroom_subscriber_stream *s = (janus_videoroom_subscriber_stream *)sl->data;
+			gboolean is_matched = FALSE;
+			guint i = 0;
+			for(i = 0; i <= num_mlines; i++) {
+				if(matched[i] == s) {
+					is_matched = TRUE;
+					break;
+				}
+			}
+			if(!is_matched) {
+				s->mindex = free_index++;
+				g_atomic_int_set(&s->ready, 0);
+				char midbuf[16];
+				g_snprintf(midbuf, sizeof(midbuf), "s%d", s->mindex);
+				char *old_mid = s->mid;
+				s->mid = g_strdup(midbuf);
+				g_free(old_mid);
+			}
+			g_hash_table_insert(subscriber->streams_byid, GINT_TO_POINTER(s->mindex), s);
+			g_hash_table_insert(subscriber->streams_bymid, g_strdup(s->mid), s);
+			sl = sl->next;
+		}
+	}
+	/* Iterate over the offer's m-lines and answer them */
+	temp = offer->m_lines;
+	while(temp) {
+		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
+		janus_videoroom_subscriber_stream *stream = matched[m->index];
 		if(stream == NULL) {
 			/* No matching stream, reject this m-line */
 			janus_sdp_generate_answer_mline(offer, answer, m,
@@ -3739,20 +3860,6 @@ static json_t *janus_videoroom_subscriber_answer(janus_videoroom_subscriber *sub
 				JANUS_SDP_OA_MLINE, JANUS_SDP_APPLICATION,
 				JANUS_SDP_OA_DONE);
 			g_atomic_int_set(&stream->ready, 1);
-			temp = temp->next;
-			continue;
-		}
-		if((stream->type == JANUS_VIDEOROOM_MEDIA_AUDIO && m->type != JANUS_SDP_AUDIO) ||
-				(stream->type == JANUS_VIDEOROOM_MEDIA_VIDEO && m->type != JANUS_SDP_VIDEO)) {
-			/* The offer's m-line order doesn't match the subscription streams: the
-			 * subscriber must offer m-lines in the same order as the attached streams */
-			JANUS_LOG(LOG_WARN, "Subscriber offer m-line #%d (%s) doesn't match the subscription stream type, rejecting it\n",
-				m->index, janus_sdp_mtype_str(m->type));
-			janus_sdp_generate_answer_mline(offer, answer, m,
-				JANUS_SDP_OA_MLINE, m->type == JANUS_SDP_AUDIO ? JANUS_SDP_AUDIO :
-					(m->type == JANUS_SDP_VIDEO ? JANUS_SDP_VIDEO : JANUS_SDP_APPLICATION),
-				JANUS_SDP_OA_DIRECTION, JANUS_SDP_INACTIVE,
-				JANUS_SDP_OA_DONE);
 			temp = temp->next;
 			continue;
 		}
@@ -3814,6 +3921,7 @@ static json_t *janus_videoroom_subscriber_answer(janus_videoroom_subscriber *sub
 		}
 		temp = temp->next;
 	}
+	g_free(matched);
 	/* Update (or set) the SDP version */
 	subscriber->session->sdp_version++;
 	answer->o_version = subscriber->session->sdp_version;
