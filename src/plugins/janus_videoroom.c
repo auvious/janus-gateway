@@ -2988,6 +2988,9 @@ static void janus_videoroom_reqpli(janus_videoroom_publisher_stream *ps, const c
 	gint64 now = janus_get_monotonic_time();
 	if(now - ps->pli_latest < G_USEC_PER_SEC) {
 		/* We just sent a PLI less than a second ago, schedule a new delivery later */
+		JANUS_LOG(LOG_VERB, "%s, delaying PLI to %s (#%d, %s), last one sent %"SCNi64"ms ago\n", reason,
+			ps->publisher->user_id_str, ps->mindex, ps->publisher->display ? ps->publisher->display : "??",
+			(now - ps->pli_latest)/1000);
 		g_atomic_int_set(&ps->need_pli, 1);
 		g_atomic_int_set(&ps->sending_pli, 0);
 		return;
@@ -9187,6 +9190,10 @@ static void janus_videoroom_incoming_rtp_internal(janus_videoroom_session *sessi
 				if(participant->remb_startup == 0)
 					participant->remb_latest = janus_get_monotonic_time();
 			}
+			/* Send any PLI that was throttled before: for remote publishers
+			 * this happens in their own thread, local ones need it here */
+			if(g_atomic_int_get(&ps->need_pli) && janus_get_monotonic_time() - ps->pli_latest >= G_USEC_PER_SEC)
+				janus_videoroom_reqpli(ps, "Delayed PLI request");
 			/* Generate FIR/PLI too, if needed */
 			if(video && ps->active && !ps->muted && (videoroom->fir_freq > 0)) {
 				/* We generate RTCP every tot seconds/frames */
