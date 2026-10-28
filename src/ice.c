@@ -2601,8 +2601,9 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 			/* Which medium does this refer to? Is this audio or video? */
 			int video = 0, vindex = 0, rtx = 0;
 			janus_ice_peerconnection_medium *medium = g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(packet_ssrc));
-			if(medium == NULL) {
-				/* SSRC not found, try the mid/rid RTP extensions if in use */
+			if(medium == NULL && packet_ssrc != 0) {
+				/* SSRC not found, try the mid/rid RTP extensions if in use (but never
+				 * associate an SSRC of 0, as that would map unset SSRCs to the stream) */
 				if(pc->mid_ext_id > 0) {
 					char sdes_item[16];
 					if(janus_rtp_header_extension_parse_mid(buf, len, pc->mid_ext_id, sdes_item, sizeof(sdes_item)) == 0) {

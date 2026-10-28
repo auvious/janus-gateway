@@ -666,7 +666,9 @@ int janus_sdp_process_remote(void *ice_handle, janus_sdp *remote_sdp, gboolean r
 					medium->ssrc_peer[vindex] = medium->ssrc_peer_new[vindex];
 					medium->ssrc_peer_new[vindex] = 0;
 				}
-				if(!g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(medium->ssrc_peer[vindex]))) {
+				/* Don't map unset SSRCs (e.g., simulcast substreams we have no SSRC for): a key
+				 * of 0 would match RTP and RTCP packets with an SSRC of 0 to this medium */
+				if(medium->ssrc_peer[vindex] && !g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(medium->ssrc_peer[vindex]))) {
 					g_hash_table_insert(pc->media_byssrc, GINT_TO_POINTER(medium->ssrc_peer[vindex]), medium);
 					janus_refcount_increase(&medium->ref);
 				}
