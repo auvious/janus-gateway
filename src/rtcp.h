@@ -377,11 +377,32 @@ gboolean janus_rtcp_check_remb(janus_rtcp_header *rtcp, int len);
 gboolean janus_is_rtcp(char *buf, guint len);
 
 /*! \brief Method to parse/validate an RTCP message
+ * @note Sender info and report blocks in SR/RR packets are not processed by this
+ * method: use janus_rtcp_parse_sender_reports and janus_rtcp_parse_report_blocks for that
  * @param[in] ctx RTCP context to update, if needed (optional)
  * @param[in] packet The message data
  * @param[in] len The message data length in bytes
  * @returns 0 in case of success, -1 on errors */
 int janus_rtcp_parse(janus_rtcp_context *ctx, char *packet, int len);
+
+/*! \brief Method to process the SR packets of an RTCP message sent by a specific SSRC
+ * @note Only SR packets whose sender SSRC matches the provided one are taken into
+ * account, as a compound RTCP packet may contain SR packets for different media
+ * @param[in] ctx RTCP context to update
+ * @param[in] packet The message data
+ * @param[in] len The message data length in bytes
+ * @param[in] ssrc The (remote) SSRC the SR packets must have been sent by
+ * @returns The number of SR packets that were processed */
+int janus_rtcp_parse_sender_reports(janus_rtcp_context *ctx, char *packet, int len, uint32_t ssrc);
+/*! \brief Method to process the report blocks of an RTCP message about a specific media source
+ * @note Only report blocks whose SSRC matches the provided one are taken into
+ * account, as a compound RTCP packet may contain report blocks for different media
+ * @param[in] ctx RTCP context to update
+ * @param[in] packet The message data
+ * @param[in] len The message data length in bytes
+ * @param[in] ssrc The (local) media source SSRC the report blocks must refer to
+ * @returns The number of report blocks that were processed */
+int janus_rtcp_parse_report_blocks(janus_rtcp_context *ctx, char *packet, int len, uint32_t ssrc);
 
 /*! \brief Method to fix incoming RTCP SR and RR data
  * @param[in] packet The message data
