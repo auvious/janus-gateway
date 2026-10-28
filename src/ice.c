@@ -3110,13 +3110,15 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 				int video = 0, vindex = 0;
 				/* Bundled streams, should we check the SSRCs? */
 				guint32 rtcp_ssrc = janus_rtcp_get_receiver_ssrc(buf, buflen);
-				janus_ice_peerconnection_medium *medium = g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(rtcp_ssrc));
+				/* Notice that an SSRC of 0 means we couldn't find any, so we don't look it up */
+				janus_ice_peerconnection_medium *medium = rtcp_ssrc ?
+					g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(rtcp_ssrc)) : NULL;
 				if(medium == NULL) {
 					/* We don't know the local SSRC: this can happen for unidirectional streams
 					 * (see https://groups.google.com/forum/#!topic/discuss-webrtc/5yuZjV7lkNc)
 					 * Check the remote SSRC, compare it to what we have */
 					rtcp_ssrc = janus_rtcp_get_sender_ssrc(buf, buflen);
-					medium = g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(rtcp_ssrc));
+					medium = rtcp_ssrc ? g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(rtcp_ssrc)) : NULL;
 					if(medium == NULL) {
 						if(rtcp_ssrc > 0) {
 							JANUS_LOG(LOG_VERB, "[%"SCNu64"] Unknown SSRC, dropping RTCP packet (SSRC %"SCNu32")...\n",
@@ -3140,26 +3142,50 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 
 				/* Let's process this RTCP (compound?) packet, and update the RTCP context for this stream in case */
 				rtcp_context *rtcp_ctx = medium->rtcp_ctx[vindex];
-				uint32_t rtt = rtcp_ctx ? rtcp_ctx->rtt : 0;
 				if(janus_rtcp_parse(rtcp_ctx, buf, buflen) < 0) {
 					/* Drop the packet if the parsing function returns with an error */
 					return;
 				}
-				if(rtcp_ctx && rtcp_ctx->rtt != rtt) {
-					/* Check the current RTT, to see if we need to update the size of the queue: we take
-					 * the RTT (should we include all media?) and add 100ms just to be conservative */
-					uint32_t medium_rtt = janus_rtcp_context_get_rtt(medium->rtcp_ctx[0]);
-					uint16_t nack_queue_ms = medium_rtt + 100;
-					if(nack_queue_ms > DEFAULT_MAX_NACK_QUEUE)
-						nack_queue_ms = DEFAULT_MAX_NACK_QUEUE;
-					else if(nack_queue_ms < min_nack_queue)
-						nack_queue_ms = min_nack_queue;
-					uint16_t mavg = rtt ? ((7*medium->nack_queue_ms + nack_queue_ms)/8) : nack_queue_ms;
-					if(mavg > DEFAULT_MAX_NACK_QUEUE)
-						mavg = DEFAULT_MAX_NACK_QUEUE;
-					else if(mavg < min_nack_queue)
-						mavg = min_nack_queue;
-					medium->nack_queue_ms = mavg;
+				/* SRs and report blocks in a compound packet may be about different media (e.g.,
+				 * when the peer is another Janus instance): that's why we match each of them to
+				 * the right medium by SSRC, rather than assuming they're all about the medium we
+				 * demultiplexed the packet to. SRs are matched to the SSRCs of the peer, report
+				 * blocks to our SSRC (report blocks about our rtx SSRCs are ignored, as are
+				 * SRs and report blocks about SSRCs we don't know) */
+				janus_ice_peerconnection_medium *rb_medium = NULL;
+				uint mi=0;
+				for(mi=0; mi<g_hash_table_size(pc->media); mi++) {
+					rb_medium = g_hash_table_lookup(pc->media, GUINT_TO_POINTER(mi));
+					if(!rb_medium || (rb_medium->type != JANUS_MEDIA_AUDIO && rb_medium->type != JANUS_MEDIA_VIDEO))
+						continue;
+					int rb_vindex = 0;
+					for(rb_vindex=0; rb_vindex<3; rb_vindex++) {
+						if(rb_medium->ssrc_peer[rb_vindex] && rb_medium->rtcp_ctx[rb_vindex])
+							janus_rtcp_parse_sender_reports(rb_medium->rtcp_ctx[rb_vindex], buf, buflen, rb_medium->ssrc_peer[rb_vindex]);
+					}
+					if(rb_medium->ssrc == 0 || rb_medium->rtcp_ctx[0] == NULL)
+						continue;
+					rtcp_context *rb_ctx = rb_medium->rtcp_ctx[0];
+					uint32_t rtt = rb_ctx->rtt;
+					if(janus_rtcp_parse_report_blocks(rb_ctx, buf, buflen, rb_medium->ssrc) > 0 &&
+							(rb_ctx->rtt != rtt || rb_medium->nack_queue_ms == 0)) {
+						/* Check the current RTT, to see if we need to update the size of the queue: we take
+						 * the RTT (should we include all media?) and add 100ms just to be conservative; in
+						 * case we don't know the RTT yet (e.g., the peer never got an SR from us), we
+						 * still initialize the queue, so that we can at least use the minimum size */
+						uint32_t medium_rtt = janus_rtcp_context_get_rtt(rb_ctx);
+						uint16_t nack_queue_ms = medium_rtt + 100;
+						if(nack_queue_ms > DEFAULT_MAX_NACK_QUEUE)
+							nack_queue_ms = DEFAULT_MAX_NACK_QUEUE;
+						else if(nack_queue_ms < min_nack_queue)
+							nack_queue_ms = min_nack_queue;
+						uint16_t mavg = rtt ? ((7*rb_medium->nack_queue_ms + nack_queue_ms)/8) : nack_queue_ms;
+						if(mavg > DEFAULT_MAX_NACK_QUEUE)
+							mavg = DEFAULT_MAX_NACK_QUEUE;
+						else if(mavg < min_nack_queue)
+							mavg = min_nack_queue;
+						rb_medium->nack_queue_ms = mavg;
+					}
 				}
 				JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Got %s RTCP (%d bytes)\n", handle->handle_id, video ? "video" : "audio", buflen);
 				/* See if there's any REMB bitrate to track */
