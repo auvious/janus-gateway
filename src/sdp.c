@@ -691,6 +691,18 @@ int janus_sdp_process_remote(void *ice_handle, janus_sdp *remote_sdp, gboolean r
 					}
 				}
 			}
+			if(m->type == JANUS_SDP_VIDEO && medium->send && medium->do_nacks && medium->ssrc != 0 && medium->ssrc_rtx == 0 &&
+					janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_RFC4588_RTX) &&
+					medium->rtx_payload_types && g_hash_table_size(medium->rtx_payload_types) > 0) {
+				/* We'll send video with RFC4588 but the peer didn't provide an rtx SSRC
+				 * (e.g., a recvonly offer without any a=ssrc), so we need our own one */
+				do {
+					medium->ssrc_rtx = janus_random_uint32();
+				} while(medium->ssrc_rtx == 0 || medium->ssrc_rtx == medium->ssrc ||
+					g_hash_table_lookup(pc->media_byssrc, GINT_TO_POINTER(medium->ssrc_rtx)));
+				g_hash_table_insert(pc->media_byssrc, GINT_TO_POINTER(medium->ssrc_rtx), medium);
+				janus_refcount_increase(&medium->ref);
+			}
 			if(m->type == JANUS_SDP_VIDEO) {
 				if((medium->ssrc_peer[1] || medium->rid[1] != NULL) && medium->rtcp_ctx[1] == NULL) {
 					medium->rtcp_ctx[1] = g_malloc0(sizeof(rtcp_context));
